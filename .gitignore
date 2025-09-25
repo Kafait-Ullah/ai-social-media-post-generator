@@ -17,5 +17,4 @@ venv/
 
 # Logs and data
 *.log
-*.txt
 data/

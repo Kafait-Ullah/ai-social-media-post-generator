@@ -8,8 +8,6 @@ import os
 from dotenv import load_dotenv
 
 # --- Core Dependencies ---
-# Make sure to install them:
-# pip install streamlit pydantic "langchain-google-genai>=1.0.3" pillow python-dotenv
 from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -18,6 +16,28 @@ from langchain_core.output_parsers.json import JsonOutputParser
 # --- Load Environment Variables ---
 load_dotenv()
 
+# --- ADDED FOR AUTHENTICATION ---
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+    if st.session_state["password_correct"]:
+        return True
+    st.header("🔐 Secure Access")
+    password = st.text_input("Enter the password to access the app", type="password")
+    if st.button("Login"):
+        correct_password = os.getenv("APP_PASSWORD")
+        if password == correct_password:
+            st.session_state["password_correct"] = True
+            st.rerun()
+        else:
+            st.error("😕 Incorrect password. Please try again.")
+    return False
+
+if not check_password():
+    st.stop()
+# ------------------------------------
+
 # --- Page & Session State Configuration ---
 st.set_page_config(
     page_title="AI Social Content Generator 📱✨",
@@ -25,7 +45,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Initialize session state to hold user inputs and generated content
+# Initialize session state
 if "generated_content" not in st.session_state:
     st.session_state.generated_content = {}
 if "image_base64" not in st.session_state:
@@ -36,10 +56,13 @@ if "business_context" not in st.session_state:
     st.session_state.business_context = ""
 if "last_uploaded_filename" not in st.session_state:
     st.session_state.last_uploaded_filename = None
+if "just_generated" not in st.session_state:
+    st.session_state.just_generated = False
+# --- NEW: Session state for the PIL image object ---
+if "pil_image" not in st.session_state:
+    st.session_state.pil_image = None
 
 # --- Pydantic Models for Structured Output ---
-# Defines the expected structure for each social media platform's content
-
 class InstagramContent(BaseModel):
     caption: str = Field(description="Engaging Instagram caption (max 2,200 chars), use emojis.")
     hashtags: List[str] = Field(description="List of 15-20 relevant hashtags, each starting with '#'.")
@@ -62,67 +85,34 @@ class LinkedInContent(BaseModel):
     post_text: str = Field(description="Professional and insightful LinkedIn post. Share expertise or company news. Use 3-5 professional hashtags.")
     hashtags: List[str] = Field(description="List of 3-5 professional hashtags, each starting with '#'.")
 
-# --- Platform Configuration: The "Single Source of Truth" ---
-# This dictionary makes the app modular. Note the "icon" is now a simple emoji.
+# --- Platform Configuration ---
 PLATFORM_CONFIG = {
-    "instagram": {
-        "name": "Instagram",
-        "icon": "📷",
-        "pydantic_model": InstagramContent,
-        "prompt": "Generate an engaging caption, 15-20 relevant hashtags, and descriptive alt text for an Instagram post."
-    },
-    "facebook": {
-        "name": "Facebook",
-        "icon": "📘",
-        "pydantic_model": FacebookContent,
-        "prompt": "Create a compelling Facebook post with an optional headline. The tone can be more detailed and community-focused. Ask a question to drive comments."
-    },
-    "x": {
-        "name": "X (Twitter)",
-        "icon": "🐦",
-        "pydantic_model": XContent,
-        "prompt": "Write a short, punchy tweet (under 280 characters) with 2-3 key hashtags."
-    },
-    "pinterest": {
-        "name": "Pinterest",
-        "icon": "📌",
-        "pydantic_model": PinterestContent,
-        "prompt": "Create a keyword-rich title and description for a Pinterest pin. Also provide a list of 10-15 relevant keywords."
-    },
-    "linkedin": {
-        "name": "LinkedIn",
-        "icon": "💼",
-        "pydantic_model": LinkedInContent,
-        "prompt": "Compose a professional LinkedIn post. The tone should be informative, industry-relevant, or share company insights. Include 3-5 professional hashtags."
-    }
+    "instagram": {"name": "Instagram", "icon": "📷", "pydantic_model": InstagramContent, "prompt": "Generate an engaging caption, 15-20 relevant hashtags, and descriptive alt text for an Instagram post."},
+    "facebook": {"name": "Facebook", "icon": "📘", "pydantic_model": FacebookContent, "prompt": "Create a compelling Facebook post with an optional headline. The tone can be more detailed and community-focused. Ask a question to drive comments."},
+    "x": {"name": "X (Twitter)", "icon": "🐦", "pydantic_model": XContent, "prompt": "Write a short, punchy tweet (under 280 characters) with 2-3 key hashtags."},
+    "pinterest": {"name": "Pinterest", "icon": "📌", "pydantic_model": PinterestContent, "prompt": "Create a keyword-rich title and description for a Pinterest pin. Also provide a list of 10-15 relevant keywords."},
+    "linkedin": {"name": "LinkedIn", "icon": "💼", "pydantic_model": LinkedInContent, "prompt": "Compose a professional LinkedIn post. The tone should be informative, industry-relevant, or share company insights. Include 3-5 professional hashtags."}
 }
 
 # --- Core Generation Function ---
 def generate_for_platform(platform_key: str, image_base64: str, business_context: str, pydantic_model: Type[BaseModel]):
-    """Generates content for a single platform using the Gemini model."""
     config = PLATFORM_CONFIG[platform_key]
     parser = JsonOutputParser(pydantic_object=pydantic_model)
-    
     prompt_text = f"""
     You are an expert social media manager. Your task is to create content for {config['name']} based on the provided image and business context.
-
     **Business Context:**
     {business_context if business_context else "Not provided. Analyze the image for general appeal."}
-
     **Platform Instructions ({config['name']}):**
     {config['prompt']}
-
     **Output Format:**
     You MUST provide your response in a valid JSON object that strictly follows this schema. Do not add any text before or after the JSON.
     Schema:
     {parser.get_format_instructions()}
     """
-    
     try:
         google_api_key = os.getenv("GOOGLE_API_KEY")
         if not google_api_key:
             raise ValueError("GOOGLE_API_KEY not found in environment variables.")
-        
         model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7, google_api_key=google_api_key)
         message = HumanMessage(
             content=[
@@ -130,22 +120,20 @@ def generate_for_platform(platform_key: str, image_base64: str, business_context
                 {"type": "image_url", "image_url": f"data:image/jpeg;base64,{image_base64}"}
             ]
         )
-        
         response = model.invoke([message])
         parsed_content = parser.parse(response.content)
         return parsed_content
-        
     except Exception as e:
         st.error(f"Error generating content for {config['name']}: {e}")
         return None
 
 # --- UI Layout ---
-
 st.title("🚀 AI Social Media Content Generator")
 st.markdown("Upload an image, describe your business (optional), select your social platforms, and let AI do the rest!")
 
 col1, col2 = st.columns([2, 3])
 
+# --- Column 1: Inputs ---
 with col1:
     st.subheader("1. Upload Your Image")
     uploaded_file = st.file_uploader(
@@ -159,8 +147,9 @@ with col1:
             st.session_state.generated_content = {}
             st.session_state.last_uploaded_filename = uploaded_file.name
         
+        # Process and store the image
         img = Image.open(uploaded_file)
-        st.image(img, caption="Your image", width=300)
+        st.session_state.pil_image = img  # Store PIL image in session state
         
         buffered = BytesIO()
         if img.mode == 'RGBA':
@@ -168,14 +157,28 @@ with col1:
         img.save(buffered, format="JPEG")
         st.session_state.image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
     
+    st.subheader("2. Describe Your Work (Optional)")
     st.session_state.business_context = st.text_area(
-        "2. Describe Your Work (Optional)",
+        "Describe Your Work (Optional)",
         value=st.session_state.business_context,
-        placeholder="e.g., I sell handmade scented candles online.",
-        help="Providing context helps the AI generate more relevant posts!"
+        placeholder="e.g., I run an online academy teaching Quran to children.",
+        help="Providing context helps the AI generate more relevant posts!",
+        label_visibility="collapsed"
     )
 
+# --- Column 2: Preview and Actions ---
 with col2:
+    st.subheader("Image Preview")
+    if st.session_state.pil_image:
+        st.image(
+            st.session_state.pil_image,
+            caption="Your uploaded image",
+            use_container_width=True
+        )
+    else:
+        st.info("Your uploaded image will be shown here.")
+    
+    st.markdown("---")
     st.subheader("3. Select Platforms")
     
     selected_platforms = []
@@ -184,10 +187,7 @@ with col2:
     
     for i, (key, config) in enumerate(PLATFORM_CONFIG.items()):
         with icon_cols[i % num_columns]:
-            st.markdown(f"<p style='text-align: center;'>{config['name']}</p>", unsafe_allow_html=True)
-            # Use markdown for a larger emoji icon
-            st.markdown(f"<h1 style='text-align: center; cursor: pointer;'>{config['icon']}</h1>", unsafe_allow_html=True)
-            if st.checkbox("", key=f"cb_{key}", value=(key in st.session_state.platforms_selected), label_visibility="collapsed"):
+            if st.checkbox(f"{config['icon']} {config['name']}", key=f"cb_{key}", value=(key in st.session_state.platforms_selected)):
                 selected_platforms.append(key)
 
     st.session_state.platforms_selected = selected_platforms
@@ -210,10 +210,15 @@ with col2:
                 )
                 if content:
                     st.session_state.generated_content[platform_key] = content
+            
+            if st.session_state.generated_content:
+                st.session_state.just_generated = True
+
             status.update(label="✅ All content generated!", state="complete")
 
-# --- Display Generated Content ---
+# --- Display Generated Content (Full Width) ---
 if st.session_state.generated_content:
+    st.markdown("<div id='output-anchor'></div>", unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🎉 Your Generated Content")
     
@@ -229,23 +234,39 @@ if st.session_state.generated_content:
         content_data = st.session_state.generated_content[platform_key]
         
         with tab:
-            # Iterate through the fields of the Pydantic model
-            for field, value in content_data.items():
-                field_title = field.replace('_', ' ').title()
+            if platform_key == 'instagram':
+                st.subheader("Caption")
+                full_caption = content_data.get('caption', '')
+                hashtags = " ".join(content_data.get('hashtags', []))
+                display_caption = f"{full_caption}\n\n.\n.\n.\n\n{hashtags}"
+                st.code(display_caption, language=None)
                 
-                if isinstance(value, list):
-                    display_value = " ".join(value) if field == 'hashtags' else ", ".join(value)
-                else:
-                    display_value = value if value else ""
-                
-                # Use subheader and code block for a clean look with a built-in copy button
-                st.subheader(field_title)
-                st.code(display_value, language=None)
+                st.subheader("Alt Text")
+                alt_text = content_data.get('alt_text', '')
+                st.code(alt_text, language=None)
+            else:
+                for field, value in content_data.items():
+                    field_title = field.replace('_', ' ').title()
+                    if isinstance(value, list):
+                        display_value = " ".join(value) if field == 'hashtags' else ", ".join(value)
+                    else:
+                        display_value = value if value else ""
+                    st.subheader(field_title)
+                    st.code(display_value, language=None)
 
-    if st.button("🔄 Try Another Version", use_container_width=True):
-        st.session_state.generated_content = {}
-        st.rerun()
-
+    if st.session_state.get("just_generated", False):
+        js_code = """
+        <script>
+            setTimeout(function() {
+                const anchor = document.getElementById('output-anchor');
+                if (anchor) {
+                    anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }, 200);
+        </script>
+        """
+        st.components.v1.html(js_code)
+        st.session_state.just_generated = False
 
 
 
